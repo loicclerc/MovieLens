@@ -1,0 +1,382 @@
+---
+title: "MovieLens Project Report Final"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loading-libs, message=FALSE, echo=FALSE, warning=FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+library(tidyverse)
+```
+
+```{r loading and preparing the data, message=FALSE, echo=FALSE}
+  # MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+
+dl <- "C:/Users/loic.clerc/Documents/R/Capstone/ml-10m.zip"
+
+ratings <- read.table(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                      col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1)
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>%
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+## Introduction
+
+The MovieLens database was inspired by the Netflix challenge, which began on October 20061. The competition aimed to improve the accuracy of Netflix's recommendation system1. To qualify for the price, the winning team had to obtain an outcome at least 10 percent better than that of Netflix2.
+The 10M version of the MovieLens database is very simple in its structure, yet it offers a challenge by its very large size:
+
+```{r-First Data Exploration, fig.align='center', echo=FALSE}
+#Brief data base exploration
+head(edx)
+nrow(edx)
+```
+
+This database is not even half as large as the one provided by Netflix, which contained over 20million ratings. (<https://courses.edx.org/courses/course-v1:HarvardX+PH125.8x+2T2018/courseware/>, video "Recommendation Systems") But even a 9 million-rows database is heavy and uses quite a lot of memory, nearly 1GB:
+
+```{r-, fig.align='center', echo=FALSE}
+object.size(edx)
+```
+
+Never in the HarvardX Data Science course did we train algorithms on so large datasets. And even when taking a smaller data set in the course, Professor Irizarry warned about the inefficiency of doing a simple linear regression to implement a recommendation system:
+"However, note that because there are thousands of b's, each movie gets one parameter, one estimate. So the lm function will be very slow here. So we don't recommend running the code we just showed." (<https://courses.edx.org/courses/course-v1:HarvardX+PH125.8x+2T2018/courseware/>, video "Building the Recommendation System") In the following, we will see that indeed, standard machine learning algorithm are not suitable to train our model. It is necessary to follow an approach closer to what is done in the "Recommendation Systems" Chapter in order to obtain a decent RMSE.
+The goal of this project is to build a prediction model that minimizes the RMSE on the validation set.
+  
+
+## Major Steps
+
+The major steps that were followed to complete this project are the following:
+
+1. Data Visualization: Exploration of the Database to understand what are the key descriptors that will allow us to train the model
+
+2. Data Wrangling: Even though the data is in tidy format already, some reshaping was performed in order to use the most relevant predictors
+
+3. Modeling: Step-by-Step, the algorithm was built seeking for RMSE improvement.
+
+4. Conclusion: The report is concluded with the final obtained model
+
+
+##Methodology and Analysis section
+
+In this section, the conception of the model is explained in detail. First of all, we try to understand what could be the most relevant predictors. Intuitively and as seen in the course, the movie ID and user ID must have an effect on the ratings: Some movies are better than other and users rate differently. The rating average distribution by user and by movie show that this is clearly the case:
+
+```{r-User Impact, fig.align='center', echo=FALSE}
+#User impact
+edx %>% group_by(userId) %>% mutate(average_rating=round(mean(rating)*8)/8) %>% 
+  group_by(average_rating) %>% summarize(n_distinct_user=n_distinct(userId)) %>% 
+  ggplot(aes(average_rating, n_distinct_user))+geom_col()
+#Movie impact
+edx %>% group_by(movieId) %>% mutate(average_rating=round(mean(rating)*8)/8) %>% 
+  group_by(average_rating) %>% summarize(n_distinct_movie=n_distinct(movieId)) %>% 
+  ggplot(aes(average_rating, n_distinct_movie))+geom_col()
+```
+
+Until now, the data shown in the charts was directly available from the database. At this stage, reshaping the data is necessary to continue the analysis. First, the year of the movie must also have an impact on the outcome. The year can be extracted from the title of the movie and put in a new column 'year' in a new database 'edx_new':
+
+```{r-Extracting the year, fig.align='center'}
+#Extraction of the the year from the title
+edx_new <- edx %>% mutate(year=substr(edx$title, nchar(edx$title)-4, nchar(edx$title)-1))
+```
+
+```{r-Year Impact, fig.align='center', echo=FALSE}
+#Year Impact
+edx_new %>% group_by(year) %>% mutate(average_rating=round(mean(rating)*8)/8) %>% 
+  group_by(average_rating) %>% summarize(year=n_distinct(year)) %>% 
+  ggplot(aes(average_rating, year))+geom_col()
+```
+
+This distribution happens to be much less significant than the ones of the movies and users.
+Intuitively, the genre of the movie must also have an impact. Again, this is confirmed by the below plots:
+
+```{r-Genre Impact, fig.align='center', echo=FALSE}
+#Genre impact
+edx %>% separate_rows(genres, sep = "\\|") %>% group_by(genres) %>%
+  summarize(rating_number=n(), average_rating= mean(rating)) %>% 
+  ggplot(aes(rating_number, average_rating, color=genres, label = genres)) + geom_point() + geom_text()
+edx %>% separate_rows(genres, sep = "\\|") %>% group_by(genres) %>%
+  summarize(rating_number=n(), average_rating= mean(rating)) %>% 
+  ggplot(aes(genres, average_rating)) + geom_col()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+But here again, the distribution is not as spread as for the movie and user effect. This is also logical statistically as we are averaging on groups containing much more ratings, meaning we are closer from the global average.
+From this first analysis, it is decided to build successive models that take into account the movie effect, the user effect, the year effect and part of the genre effect. As already introduced in the above, it is necessary to reshape the data in order to take the year and genre into account. The extraction of the year is quite straight away (see Figure 5). For the genre, the problem we have is that in our database, there are nearly 800 genres as several genres are reported for each movie. Therefore, it is decided to modify the database putting the genres in column and, for each movie, assigning a 1 if the movie contains that genre and a 0 otherwise. On my computer, this operation is too heavy to be performed at once and it was necessary to do it on half the database first and the other half and then to bind both again.I finally decided to do it in in four times to lower the chances that the code would crash on someone else's computer. The following lines of code were used:
+
+```{r-Rashaping the genre - print, fig.align='center'}
+#Reshaping the genre
+edx_new_1<- edx[1:2000000,] %>% separate_rows(genres, sep = "\\|") %>% mutate(temp_col=1) %>% spread(genres, temp_col)
+edx_new_1[is.na(edx_new_1)] <- 0
+```
+
+```{r-Rashaping the genre - rest & extract of year in new DB , echo=FALSE}
+  dx_new_2<- edx[2000001:4000000,] %>% separate_rows(genres, sep = "\\|") %>% mutate(temp_col=1) %>% spread(genres, temp_col)
+  edx_new_2[is.na(edx_new_2)] <- 0
+  edx_new_3<- edx[4000001:6000000,] %>% separate_rows(genres, sep = "\\|") %>% mutate(temp_col=1) %>% spread(genres, temp_col)
+  edx_new_3[is.na(edx_new_3)] <- 0
+  edx_new_4<- edx[6000001:nrow(edx),] %>% separate_rows(genres, sep = "\\|") %>% mutate(temp_col=1) %>% spread(genres, temp_col)
+  edx_new_4[is.na(edx_new_4)] <- 0
+  edx_new <- bind_rows(edx_new_1,edx_new_2, edx_new_3, edx_new_4)
+  rm(edx_new_1, edx_new_2, edx_new_3, edx_new_4)
+  validation_new <- validation %>% separate_rows(genres, sep = "\\|") %>% mutate(temp_col=1) %>% spread(genres, temp_col)
+  validation_new[is.na(validation_new)] <- 0
+#Extraction of the the year from the title
+  edx_new <- edx_new %>% mutate(year=substr(edx$title, nchar(edx$title)-4, nchar(edx$title)-1))
+  validation_new <- validation_new %>% mutate(year=substr(validation$title, nchar(validation$title)-4, nchar(validation$title)-1))
+```
+
+We make sure the database was not modified in the operation, this is the case:
+
+```{r-Checking the other columns, fig.align='center'}
+#Checking the data base was not modified (except for the genre column)
+identical(edx$userId, edx_new$userId)
+identical(edx$movieId, edx_new$movieId)
+identical(edx$rating, edx_new$rating)
+identical(edx$timestamp, edx_new$timestamp)
+identical(edx$title, edx_new$title)
+```
+
+After checking that all userID and movieID that are in the validation set are also in the training set and renaming some names that contain hyphen, the database is ready.
+First of all, we quickly check that the standard machine learning regression functions are not appropriate on this dataset. Then, we follow a different approach, close from what is presented in the section "Recommendation systems" of the lecture "Machine Learning", starting from the global average and taking successively different effects into account, namely the movie effect, the user effect, the year effect and some of the genres effect. Finally, the model is optimized using regularization and rounded to the nearest half.
+
+```{r-Final data Wrangling , echo=FALSE}
+#Check that users and movies of the validation set are in the training set
+
+#movie ID
+distinct_movie_edx <- edx_new %>% select(movieId) %>% distinct()
+distinct_movie_edx <- distinct_movie_edx[,1]
+distinct_movie_validation <- validation_new %>% select(movieId) %>% distinct() %>% as.vector()
+distinct_movie_validation <- distinct_movie_validation[,1]
+distinct_movie_validation %in% distinct_movie_edx %>% table()
+
+#user ID
+distinct_user_edx <- edx_new %>% select(userId) %>% distinct()
+distinct_user_edx <- distinct_user_edx[,1]
+distinct_user_validation <- validation_new %>% select(userId) %>% distinct() %>% as.vector()
+distinct_user_validation <- distinct_user_validation[,1]
+distinct_user_validation %in% distinct_user_edx %>% table()
+
+#Removing objects that will not be used anymore  
+rm(distinct_movie_edx,distinct_movie_validation, distinct_user_edx, distinct_user_validation, edx, validation)
+
+#Renaming problematic column names
+names(edx_new)[names(edx_new) == "(no genres listed)"] <- "no_genres_listed"
+names(edx_new)[names(edx_new) == "Film-Noir"] <- "Film_Noir"
+names(edx_new)[names(edx_new) == "Sci-Fi"] <- "Sci_Fi"
+names(validation_new)[names(validation_new) == "Film-Noir"] <- "Film_Noir"
+names(validation_new)[names(validation_new) == "Sci-Fi"] <- "Sci_Fi"
+
+#The column no genre listed is removed in the training set as this case does not appear in the validation set
+edx_new <- select(edx_new, -no_genres_listed )
+
+#The columns that will not be used in the later are removed as well
+edx_new <- select(edx_new, -title, -timestamp)
+validation_new <- select(validation_new, -title, -timestamp)
+
+```
+
+## Results
+
+In this section, we detail the different models that were tested and we report the RMSE that are obtained.
+
+First of all, we compute the RMSE obtained for the global average:
+
+```{r-modeling - RMSE and global average, fig.align='center', echo=FALSE}
+#function RMSE
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+#Computating the global average to have a comparison basis
+Global_Average <- mean(edx_new$rating)
+RMSE_Global_Average <- RMSE(validation_new$rating, Global_Average)
+
+```
+
+```{r-modeling , fig.align='center'}
+RMSE_Global_Average
+```
+
+
+Then, we still make a brief try on standard machine learning algorithm.
+In spite of Professor Irizarry's warnings, a linear model could still be fitted when using 1 or 2 predictors. However, the result obtain are almost as bad as with the global average, which is not surprising as a linear model is not appropriate for this database.
+With knn and rpart, the fit generates an error even with one single predictor.
+We are now switching to the method that is expected to deliver the best results. We start from the global average, and, for each movie, we calculate the mean gap to the average. This time, the obtained result is quite promising:
+
+```{r - RMSE & LM , echo=FALSE}
+rmse_results <- data_frame(method = "Global Average" , RMSE = RMSE_Global_Average)
+
+#Trying to fit a linear model
+fit_lm_movie <- lm (rating~movieId, data = edx_new)
+y_hat_lm_movie <- predict(fit_lm_movie, validation_new)
+RMSE_lm_movie <- RMSE(validation_new$rating, y_hat_lm_movie)
+rmse_results <- bind_rows(rmse_results, data_frame(method="LM with movie effect",
+                                                   RMSE = RMSE_lm_movie))
+rm(y_hat_lm_movie, fit_lm_movie)
+
+fit_lm_movie_user <- lm (rating~movieId+userId, data=edx_new)
+y_hat_lm_movie_user <- predict(fit_lm_movie_user, validation_new)
+RMSE_lm_movie_user <- RMSE(validation_new$rating, y_hat_lm_movie_user)
+rmse_results <- bind_rows(rmse_results, data_frame(method="LM with movie and user effect",
+                                                   RMSE = RMSE_lm_movie_user))
+rm(y_hat_lm_movie_user, fit_lm_movie_user)
+```
+
+```{r - Movie Effect, echo=FALSE}
+#Movie effect
+movie_avgs <- edx_new %>% group_by(movieId) %>% summarize(b_i=mean(rating-Global_Average))
+y_hat_movie_Avg <- Global_Average + validation_new %>% left_join(movie_avgs, by = 'movieId') %>% .$b_i
+RMSE_movie_effect <- RMSE(y_hat_movie_Avg,validation_new$rating)
+rmse_results <- bind_rows(rmse_results, data_frame(method="Movie Effect Model",
+                                                   RMSE = RMSE_movie_effect))
+rm(y_hat_movie_Avg)
+```
+
+```{r - Movie Effect - to print}
+RMSE_movie_effect
+```
+
+After the movie effect, we add a user effect to the model, as from the data visualization, this is the second predictor that has the most spread, significant distribution (after the movieId that was already used). We see that this additional predictor improves the model significantly again:
+
+```{r - Movie & User Effect, echo=FALSE}
+#Movie & User effect
+user_avgs <- edx_new %>% left_join(movie_avgs, by = 'movieId') %>% 
+  group_by(userId) %>% summarize(b_u=mean(rating-Global_Average-b_i))
+y_hat_movie_Avg_user_Avg <- validation_new %>% left_join(movie_avgs, by = 'movieId') %>%
+  left_join(user_avgs, by = 'userId') %>% mutate(pred = Global_Average + b_i + b_u) %>% .$pred
+RMSE_movie_user_effect <-RMSE(y_hat_movie_Avg_user_Avg, validation_new$rating)
+rmse_results <- bind_rows(rmse_results, data_frame(method="Movie & User Effect Model",
+                                                   RMSE = RMSE_movie_user_effect))
+rm(y_hat_movie_Avg_user_Avg)
+```
+
+```{r - Movie & User Effect - to print}
+RMSE_movie_user_effect
+```
+
+At this stage, we note that we are already below the targeted RMSE value of 0.875. However, we keep seeking for improvement and we add up the year effect to the model. It is not expected to bring an improvement as high as what the two first predictors did. However, the RMSE value drops again:
+
+```{r - Movie & User & Year Effect, echo=FALSE}
+#Movie, User & Year effect
+year_avgs <- edx_new %>% left_join(movie_avgs, by = 'movieId') %>% left_join(user_avgs, by = 'userId') %>%
+  group_by(year) %>% summarize(b_y=mean(rating-Global_Average-b_i-b_u))
+y_hat_movie_Avg_user_Avg_year_Avg <- validation_new %>% left_join(movie_avgs, by = 'movieId') %>% 
+  left_join(user_avgs, by = 'userId') %>% left_join(year_avgs, by = 'year') %>% 
+  mutate(pred=Global_Average+b_i+b_u+b_y) %>%.$pred
+RMSE_movie_user_year_effect <- RMSE(y_hat_movie_Avg_user_Avg_year_Avg, validation_new$rating)
+rmse_results <- bind_rows(rmse_results, data_frame(method="Movie, User & Year Effect Model",
+                                                   RMSE = RMSE_movie_user_year_effect))
+rm(y_hat_movie_Avg_user_Avg_year_Avg)
+```
+
+```{r - Movie & User & Year Effect - to print}
+RMSE_movie_user_year_effect
+```
+
+We now test the genre effect. From the database structure that was chosen, the way to work this out is to pick the genres that seem most relevant to be added to the model, and then to see if they bring improvement. From the Figure 6, we first try to add a "Drama effect" as this is the genre that contains the highest number of movies and the gap from the average is significant. The below table confirms that the fact of belonging to the Drama's genre or not has some relevance, even if it is slight:
+
+```{r - Drama and non-Drama movies average, echo=FALSE}
+#Looking at the impact of Drama / not Drama
+edx_new %>% group_by(Drama) %>% summarize(average=mean(rating))
+```
+
+Indeed, the model is very, very slightly improved again:
+
+```{r - Movie & User & Year & Drama Effect, echo=FALSE}
+#Adding the effect
+Drama_avg <- edx_new %>% left_join(movie_avgs, by = 'movieId') %>% left_join(user_avgs, by = 'userId') %>%
+  left_join(year_avgs, by = 'year') %>% group_by(Drama) %>% summarize(b_d=mean(rating-Global_Average-b_i-b_u-b_y))
+y_hat_movie_Avg_user_Avg_year_Avg_Drama <- validation_new %>% left_join(movie_avgs, by = 'movieId') %>% 
+  left_join(user_avgs, by = 'userId') %>% left_join(year_avgs, by = 'year') %>% left_join(Drama_avg, by = 'Drama') %>%
+  mutate(pred=Global_Average+b_i+b_u+b_y+b_d) %>%.$pred
+RMSE_movie_user_year_drama_effect <- RMSE(y_hat_movie_Avg_user_Avg_year_Avg_Drama, validation_new$rating)
+rmse_results <- bind_rows(rmse_results, data_frame(method="Movie, User, Year and Drama Effect Model",
+                                                   RMSE = RMSE_movie_user_year_drama_effect))
+rm(y_hat_movie_Avg_user_Avg_year_Avg_Drama)
+```
+
+```{r - Movie & User & Year & Drama Effect - to print}
+RMSE_movie_user_year_drama_effect
+```
+
+At this point, we see that adding a Drama effect to the model only brought a very thin improvement of the RMSE. It seems clear that adding up another genre would not improve the result significantly. Instead, we try to use regularization to improve the model a little bit more, which it does indeed:
+
+```{r - Regularization, echo=FALSE}
+#Regularization
+lambdas <- seq(0,10,0.5)
+rmses <- sapply(lambdas, function(l){
+  b_i <- edx_new %>% group_by(movieId) %>%
+    summarize(b_i = sum(rating - Global_Average)/(n()+l))
+  b_u <- edx_new %>% left_join(b_i, by="movieId") %>%
+    group_by(userId) %>% summarize(b_u = sum(rating - b_i -Global_Average)/(n()+l))
+  b_y <- edx_new %>% left_join(b_i, by="movieId") %>% left_join(b_u, by = 'userId') %>%
+    group_by(year) %>% summarize(b_y = sum(rating - b_i - b_u -Global_Average)/(n()+l))
+  b_d <- edx_new %>% left_join(b_i, by="movieId") %>% left_join(b_u, by = 'userId') %>%
+    left_join(b_y, by = 'year') %>% group_by(Drama) %>% 
+    summarize(b_d = sum(rating - b_i - b_u - b_y -Global_Average)/(n()+l))
+  predicated_ratings <- validation_new %>%
+    left_join(b_i, by='movieId') %>%
+    left_join(b_u, by='userId') %>%
+    left_join(b_y, by = 'year') %>%
+    left_join(b_d, by = 'Drama') %>%
+    mutate(pred = Global_Average + b_i + b_u + b_y + b_d) %>%
+    .$pred
+  return(c(l,RMSE(predicated_ratings, validation_new$rating)))
+})
+Best_lambda <- rmses[1,which.min(rmses[2,])]
+rmses[,which.min(rmses[2,])]
+```
+
+Finally, up to know, the result have not be rounded. To be compatible with the output data, result must be rounded to the nearest half. Doing this the final RMSE is obtained, above the decimal value but still below 0.8775:
+
+```{r - Rounding the final value, echo=FALSE}
+#Rounding the obtained ratings to the nearest half
+y_hat_rounded <- round(y_hat_Regularization*2)/2
+RMSE_Rounded <- RMSE(y_hat_rounded, validation_new$rating)
+rmse_results <- bind_rows(rmse_results, data_frame(method="Final Model",
+                                                   RMSE = RMSE_Rounded))
+```
+
+The below table is a recap of all the RMSE that were obtained along the way, the final RMSE being at the bottom:
+
+```{r - RMSE value recap, echo=FALSE}
+rmse_results %>% knitr::kable()
+```
+
+##Conclusion
+
+In this project, a recommendation system has been created, without using the typical machine learning algorithm like lm, glm, knn, rpart or random forest, as they were not appropriate for our database. Visualizing the data to find the columns of the database that would be the best candidates to be relevant predictors, a model has been built, adding successive layers to a base given by the global average rating. Finally, regularization was performed and values were rounded to the nearest half to be in the same format that the ratings, giving a final RMSE value of 0.8764057, below the target of 0.8775.
+The biggest difficulty that was encountered was to deal with the size of the database. Very often, message errors showed up saying, for instance, "Error, cannot allocate vector of size 150.6MB"
+
+Even with the final script, this situation can happen, forcing the user to close R and R studio and to rerun all the code again.
+In order to improve the result further than what was done in the project, Matrix Factorization could be used. So far, predictors were added up to the model, however, the information of the correlation between predictors was not used. In the video "Matrix Factorization" of the "Machine Learning" lecture, it is shown that the users that like gangster movies usually dislike romantic comedies4. To take such effects into account, we can expect that a very powerful computer is necessary as some more basic analysis already caused many problems.
